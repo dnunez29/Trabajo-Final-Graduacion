@@ -47,3 +47,17 @@ def normalize_block_name(block_name):
     
     return normalized.strip()
 
+def limpiar_entorno(vars_a_conservar):
+    especiales = [k for k in globals().keys() if k.startswith('_') or k in (
+        '__builtins__', '__name__', '__doc__', '__package__', '__loader__',
+        '__spec__', '__annotations__', '__file__', '__cached__'
+    )]
+    
+    conservar = set(vars_a_conservar) | set(especiales)
+
+    # Creamos un bloque de código que borra las variables que no se van a conservar
+    for var in list(globals()):
+        if var not in conservar:
+            exec(f"del {var}", globals())
+
+
