@@ -231,3 +231,16 @@ def create_heatmap(gdf, grid=None, show_grid=True, grid_style='white'):
     plt.title(title, fontsize=16, fontweight='bold', pad=20)
     plt.tight_layout()
     plt.show()
+
+def obtener_estacion(fecha):
+    mes = fecha.month
+    dia = fecha.day
+
+    if (mes == 12 and dia >= 21) or (1 <= mes <= 2) or (mes == 3 and dia < 20):
+        return 'winter'
+    elif (mes == 3 and dia >= 20) or (4 <= mes <= 5) or (mes == 6 and dia < 21):
+        return 'spring'
+    elif (mes == 6 and dia >= 21) or (7 <= mes <= 8) or (mes == 9 and dia < 23):
+        return 'summer'
+    elif (mes == 9 and dia >= 23) or (10 <= mes <= 11) or (mes == 12 and dia < 21):
+        return 'autumn'
