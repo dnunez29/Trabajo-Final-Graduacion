@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import re
 import os
+import holidays
 import geopandas as gpd
 import contextily as ctx
 from shapely.geometry import Point, box
@@ -244,3 +245,140 @@ def obtener_estacion(fecha):
         return 'summer'
     elif (mes == 9 and dia >= 23) or (10 <= mes <= 11) or (mes == 12 and dia < 21):
         return 'autumn'
+    
+def variablesTemporales(data):
+    # Se declaran las condiciones para segregar el dia por periodos
+    condiciones = [
+    (data['hour'] >= 6 ) & (data['hour'] < 12 ),
+    (data['hour'] >= 12 ) & (data['hour'] < 20 ),
+    (data['hour'] < 6 ) | (data['hour'] >= 20)
+    ]
+    # Se definen los periodos posibles
+    periodOfTheDay = ['Morning', 'Afternoon', 'Night']
+    # Se define el periodo con base en la columna 'hour'
+    data["time_of_day"] = np.select(condiciones, periodOfTheDay, default='Unknown') 
+    # Convertimos fecha en objeto datetime
+    data['dispatch_date'] = pd.to_datetime(data['dispatch_date'])
+    # Extraemos el día de la semana
+    data['day_of_week'] = data['dispatch_date'].dt.day_name()
+    # # Extraemos semana del año
+    data['week_of_year'] = data['dispatch_date'].dt.isocalendar().week
+    # # Extraemos mes
+    data['month'] = data['dispatch_date'].dt.month_name()
+    # # Extraemos estación del año
+    data['season'] = data['dispatch_date'].apply(obtener_estacion)
+    # Se definen los feriados en Filadelfia
+    us_holidays = holidays.UnitedStates(years=data['dispatch_date'].dt.year.unique(),state='PA')
+    # Crear la nueva columna que marca si es feriado o no
+    data['is_holiday'] = data['dispatch_date'].dt.date.isin(us_holidays)
+
+    return(data)
+
+def variablesContextuales(data):
+    # Diccionario de clasificación
+    clasificacion_violencia = {
+        'Aggravated Assault No Firearm': 'Violent',
+        'Aggravated Assault Firearm': 'Violent',
+        'Arson': 'Non-Violent',
+        'Robbery Firearm': 'Violent',
+        'Robbery No Firearm': 'Violent',
+        'Homicide - Criminal': 'Violent',
+        'Homicide - Justifiable': 'Violent',
+        'Rape': 'Violent',
+        'Other Assaults': 'Violent',
+        'Offenses Against Family and Children': 'Violent',
+        'Other Sex Offenses (Not Commercialized)': 'Violent',
+        'Weapon Violations': 'Violent',  # borderline, pero la incluimos como violento
+
+        # Resto son no violentos
+        'Thefts': 'Non-Violent',
+        'Theft from Vehicle': 'Non-Violent',
+        'All Other Offenses': 'Non-Violent',
+        'Motor Vehicle Theft': 'Non-Violent',
+        'Receiving Stolen Property': 'Non-Violent',
+        'Vandalism/Criminal Mischief': 'Non-Violent',
+        'Burglary Residential': 'Non-Violent',
+        'Burglary Non-Residential': 'Non-Violent',
+        'DRIVING UNDER THE INFLUENCE': 'Non-Violent',
+        'Fraud': 'Non-Violent',
+        'Narcotic / Drug Law Violations': 'Non-Violent',
+        'Public Drunkenness': 'Non-Violent',
+        'Forgery and Counterfeiting': 'Non-Violent',
+        'Disorderly Conduct': 'Non-Violent',
+        'Embezzlement': 'Non-Violent',
+        'Prostitution and Commercialized Vice': 'Non-Violent',
+        'Liquor Law Violations': 'Non-Violent',
+        'Vagrancy/Loitering': 'Non-Violent',
+        'Gambling Violations': 'Non-Violent'
+    }
+
+    data['crimeType'] = data['crime_description'].map(clasificacion_violencia).fillna('Desconocido')
+    
+    return(data)
+
+def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp", USACensus_path = "../Input/USACensus.csv"):
+    gdf = data.to_crs(epsg = 4326)
+    zcta = gpd.read_file(zcta_path).to_crs(epsg=5070) # https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2024&layergroup=ZIP+Code+Tabulation+Areas
+    # Rename ZCTA geometry column to avoid conflict
+    zcta = zcta[['ZCTA5CE20', 'geometry']]
+    # Ahora se calcula el área para cada polígono
+    zcta['area_mile2'] = zcta.geometry.area/ 2_589_988.110336
+    # Se convierte la pasada geometria a coordinadas lat/lon
+    zcta_lat_lon = zcta.to_crs(epsg=4326)
+    # Se procede con un JOIN espacial
+    gdf = gpd.sjoin(gdf, zcta_lat_lon, how="left", predicate='within')
+    # Se renombra por simplicidad
+    gdf = gdf.rename(columns={'ZCTA5CE20': 'ZCTA'})
+    # Se eliminan las columnas que no serán de utilidad
+    gdf = gdf.drop(['index_right', 'crime_code', 'grid_id', 'location_block_normalized'], axis=1)
+    # Se importa la información del Censo Oficial de USA
+    USACensus = pd.read_csv(USACensus_path, skiprows=1, header=0)
+    # Cambiar nombre de columna
+    USACensus = USACensus.rename(columns={
+        'Geographic Area Name': 'ZCTA',
+        'Count!!SEX AND AGE!!Total population' : 'population'
+        })
+    # Eliminar el patrón "ZCTA5 " de todos los valores de esa columna
+    USACensus['ZCTA'] = USACensus['ZCTA'].str.replace('ZCTA5 ', '', regex=False)
+    # Se toma el ZIP Code y la poblacion total para dicha area
+    USACensus_Total_Population = USACensus[['ZCTA', 'population']]
+    # Se hace el JOIN con el ZCTA como llave
+    gdf_with_population = gdf.merge(USACensus_Total_Population, on='ZCTA', how='left')
+    # Se calcula la densidad poblacional por area de ZIP Code
+    gdf_with_population['density_mile2'] = gdf_with_population['population'] / gdf_with_population['area_mile2'] 
+
+    return(gdf_with_population)
+
+def robust_minmax_with_params(s, q1, q99):
+    s_clipped = s.clip(lower=q1, upper=q99)
+    denom = (q99 - q1) if (q99 - q1) != 0 else 1.0
+    return (s_clipped - q1) / denom
+
+def categorize(p, thresholds):
+    if p <= thresholds['low_threshold']:
+        return 'Low'
+    elif p <= thresholds['high_threshold']:
+        return 'Moderate'
+    else:
+        return 'High'
+    
+def cleanDataframe(data):
+    data = gpd.GeoDataFrame(data, crs='EPSG:4326')
+
+    # Parse dates and ensure correct types
+    data['dispatch_date'] = pd.to_datetime(data['dispatch_date'], errors='coerce')
+
+    # Sanity checks and minimal cleaning
+    num_cols = ['dc_dist', 'hour', 'ZCTA', 'area_mile2', 'population', 'density_mile2']
+    for c in num_cols:
+        if c in data.columns:
+            data[c] = pd.to_numeric(data[c], errors='coerce')
+
+    # Ensure categorical harmonization
+    data['crimeType'] = data['crimeType'].str.title()
+
+    # Keep only rows with non-null population and area to avoid divide-by-zero later
+    data = data[(data['population'].notna()) & (data['population'] > 0) & (data['area_mile2'].notna()) & (data['area_mile2'] > 0)]
+    print('Filtered to rows with positive population and area. Shape:', data.shape)
+
+    return(data)
