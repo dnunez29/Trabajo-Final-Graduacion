@@ -6,7 +6,6 @@ import re
 import os
 import holidays
 import geopandas as gpd
-import contextily as ctx
 from shapely.geometry import Point, box
 from scipy.stats import gaussian_kde
 from scipy.ndimage import gaussian_filter
@@ -316,17 +315,33 @@ def variablesContextuales(data):
     
     return(data)
 
-def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp", USACensus_path = "../Input/USACensus.csv"):
+def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp", USACensus_path = "../Input/USACensus/USACensus.csv"):
     gdf = data.to_crs(epsg = 4326)
     zcta = gpd.read_file(zcta_path).to_crs(epsg=5070) # https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2024&layergroup=ZIP+Code+Tabulation+Areas
-    # Rename ZCTA geometry column to avoid conflict
+    # Se renombra para evitar conflicto
     zcta = zcta[['ZCTA5CE20', 'geometry']]
     # Ahora se calcula el área para cada polígono
     zcta['area_mile2'] = zcta.geometry.area/ 2_589_988.110336
     # Se convierte la pasada geometria a coordinadas lat/lon
     zcta_lat_lon = zcta.to_crs(epsg=4326)
-    # Se procede con un JOIN espacial
-    gdf = gpd.sjoin(gdf, zcta_lat_lon, how="left", predicate='within')
+     # Se procede con un JOIN espacial
+    gdf_joined = gpd.sjoin(gdf, zcta_lat_lon, how="left", predicate='within')
+    
+    # KEY CHANGE: Replace point geometry with ZCTA polygon geometry
+    # First, merge with zcta_lat_lon to get the ZCTA geometries
+    gdf_with_zcta_geom = gdf_joined.merge(
+        zcta_lat_lon[['ZCTA5CE20', 'geometry']], 
+        on='ZCTA5CE20', 
+        how='left',
+        suffixes=('_point', '_zcta')
+    )
+    
+    # Drop the original point geometry and rename ZCTA geometry
+    gdf_with_zcta_geom = gdf_with_zcta_geom.drop('geometry_point', axis=1)
+    gdf_with_zcta_geom = gdf_with_zcta_geom.rename(columns={'geometry_zcta': 'geometry'})
+    
+    # Ensure it's still a GeoDataFrame with the correct geometry column
+    gdf = gpd.GeoDataFrame(gdf_with_zcta_geom, geometry='geometry')
     # Se renombra por simplicidad
     gdf = gdf.rename(columns={'ZCTA5CE20': 'ZCTA'})
     # Se eliminan las columnas que no serán de utilidad
@@ -363,6 +378,7 @@ def categorize(p, thresholds):
         return 'High'
     
 def cleanDataframe(data):
+
     data = gpd.GeoDataFrame(data, crs='EPSG:4326')
 
     # Parse dates and ensure correct types
@@ -382,3 +398,65 @@ def cleanDataframe(data):
     print('Filtered to rows with positive population and area. Shape:', data.shape)
 
     return(data)
+
+def apply_risk_indicator(df_new, fitted_params):
+    df_new['dispatch_date'] = pd.to_datetime(df_new['dispatch_date'], errors='coerce')
+    num_cols = ['dc_dist', 'hour', 'ZCTA', 'area_mile2', 'population', 'density_mile2']
+    for c in num_cols:
+        if c in df_new.columns:
+            df_new[c] = pd.to_numeric(df_new[c], errors='coerce')
+    df_new['crimeType'] = df_new['crimeType'].str.title()
+    df_new = df_new[(df_new['population'] > 0) & (df_new['area_mile2'] > 0)]
+
+    grp_keys = ['ZCTA', 'time_of_day']
+    agg = df_new.groupby(grp_keys).size().reset_index(name='crime_count')
+
+    zcta_denom = df_new.groupby('ZCTA').agg(
+        population=('population','median'),
+        area_mile2=('area_mile2','median'),
+        density_mile2=('density_mile2','median')
+    ).reset_index()
+    agg = agg.merge(zcta_denom, on='ZCTA', how='left')
+
+    agg['exposure_capita'] = agg['population']
+    agg['exposure_area'] = agg['area_mile2']
+
+    # Use stored priors
+    alpha_capita, beta_capita = fitted_params['alpha_capita'], fitted_params['beta_capita']
+    alpha_area, beta_area = fitted_params['alpha_area'], fitted_params['beta_area']
+
+    agg['rate_capita_post'] = (alpha_capita + agg['crime_count']) / (beta_capita + agg['exposure_capita'])
+    agg['rate_area_post'] = (alpha_area + agg['crime_count']) / (beta_area + agg['exposure_area'])
+
+    violence_grp = df_new.groupby(['ZCTA','time_of_day']).apply(
+        lambda g: np.mean(g['crimeType'].eq('Violent'))
+    ).reset_index(name='violent_share')
+    agg = agg.merge(violence_grp, on=['ZCTA','time_of_day'], how='left')
+    agg['violent_share'] = agg['violent_share'].fillna(0.0)
+
+    # Normalize with train quantiles
+    q_params = fitted_params['q_params']
+    agg['capita_norm'] = robust_minmax_with_params(agg['rate_capita_post'], *q_params['rate_capita_post'])
+    agg['area_norm'] = robust_minmax_with_params(agg['rate_area_post'], *q_params['rate_area_post'])
+    agg['density_norm'] = robust_minmax_with_params(agg['density_mile2'], *q_params['density_mile2'])
+    agg['violent_norm'] = robust_minmax_with_params(agg['violent_share'], *q_params['violent_share'])
+
+    agg['risk_score'] = (
+        0.35 * agg['capita_norm'] +
+        0.35 * agg['area_norm'] +
+        0.15 * agg['density_norm'] +
+        0.15 * agg['violent_norm']
+    )
+
+    # Apply stored thresholds
+    thresholds = fitted_params['thresholds']
+    def categorize(p):
+        if p <= thresholds['low_threshold']:
+            return 'Low'
+        elif p <= thresholds['high_threshold']:
+            return 'Moderate'
+        else:
+            return 'High'
+    agg['risk_level'] = agg['risk_score'].apply(categorize)
+
+    return agg
