@@ -315,7 +315,7 @@ def variablesContextuales(data):
     
     return(data)
 
-def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp", USACensus_path = "../Input/USACensus/USACensus.csv"):
+def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp", USACensus_path = "../Input/USACensus/USACensus.csv", USACensus_income_path = "../Input/USACensus/USACensus_IncomeByZCTA.csv", USACensus_Gini_path = "../Input/USACensus/USACensus_GiniIndexByZCTA.csv"):
     gdf = data.to_crs(epsg = 4326)
     zcta = gpd.read_file(zcta_path).to_crs(epsg=5070) # https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2024&layergroup=ZIP+Code+Tabulation+Areas
     # Se renombra para evitar conflicto
@@ -350,19 +350,72 @@ def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp
     USACensus = pd.read_csv(USACensus_path, skiprows=1, header=0)
     # Cambiar nombre de columna
     USACensus = USACensus.rename(columns={
-        'Geographic Area Name': 'ZCTA',
-        'Count!!SEX AND AGE!!Total population' : 'population'
-        })
+    'Geographic Area Name': 'ZCTA',
+    'Count!!SEX AND AGE!!Total population' : 'population',
+    'Count!!MEDIAN AGE BY SEX!!Both sexes' : 'median_age',
+    'Count!!RACE!!Total population!!One Race!!White' : 'white_race_population',
+    'Count!!RACE!!Total population!!One Race!!Black or African American' : 'black_race_population',
+    'Count!!RACE!!Total population!!One Race!!Asian' : 'asian_race_population',
+    'Count!!HISPANIC OR LATINO!!Total population!!Hispanic or Latino (of any race)': 'latino_race_population'})
     # Eliminar el patrón "ZCTA5 " de todos los valores de esa columna
     USACensus['ZCTA'] = USACensus['ZCTA'].str.replace('ZCTA5 ', '', regex=False)
     # Se toma el ZIP Code y la poblacion total para dicha area
-    USACensus_Total_Population = USACensus[['ZCTA', 'population']]
+    USACensus_Total_Population = USACensus[['ZCTA', 'population', 'white_race_population','black_race_population', 'asian_race_population','latino_race_population']]
     # Se hace el JOIN con el ZCTA como llave
     gdf_with_population = gdf.merge(USACensus_Total_Population, on='ZCTA', how='left')
     # Se calcula la densidad poblacional por area de ZIP Code
     gdf_with_population['density_mile2'] = gdf_with_population['population'] / gdf_with_population['area_mile2'] 
 
-    return(gdf_with_population)
+    # Se importa la información oficial del ingreso por ZCTA de USA https://data.census.gov/table/ACSDT5Y2023.B19083?q=median+income&g=040XX00US42$8600000&tp=true
+    USACensus_IncomeByZCTA = pd.read_csv(USACensus_income_path, skiprows=1, header=0)
+    # Cambiar nombre de columna
+    USACensus_IncomeByZCTA = USACensus_IncomeByZCTA.rename(columns={
+        'Geographic Area Name': 'ZCTA',
+        'Estimate!!Households!!Total' : 'households',
+        'Estimate!!Households!!Total!!Less than $10,000' : 'household_10k_or_less',
+        'Estimate!!Households!!Total!!$10,000 to $14,999' : 'household_10k_to_15k',
+        'Estimate!!Households!!Total!!$15,000 to $24,999' : 'household_15k_to_25k',
+        'Estimate!!Households!!Total!!$25,000 to $34,999' : 'household_25k_to_35k',
+        'Estimate!!Households!!Total!!$35,000 to $49,999': 'household_35k_to_50k',
+        'Estimate!!Households!!Total!!$50,000 to $74,999': 'household_50k_to_75k',
+        'Estimate!!Households!!Total!!$75,000 to $99,999': 'household_75k_to_100k', 
+        'Estimate!!Households!!Total!!$100,000 to $149,999': 'household_100k_to_150k',
+        'Estimate!!Households!!Total!!$150,000 to $199,999': 'household_150k_to_200k', 
+        'Estimate!!Households!!Total!!$200,000 or more': 'household_200k_or_more',
+        'Estimate!!Households!!Median income (dollars)': 'median_income',
+        'Estimate!!Households!!Mean income (dollars)': 'mean_income'})
+    # Eliminar el patrón "ZCTA5 " de todos los valores de esa columna
+    USACensus_IncomeByZCTA['ZCTA'] = USACensus_IncomeByZCTA['ZCTA'].str.replace('ZCTA5 ', '', regex=False)
+    # Agrupamos la informacion de ingreso en grupos más grandes para redecir cardinaldidad de la base final
+    USACensus_IncomeByZCTA['household_25k_or_less'] = pd.to_numeric(USACensus_IncomeByZCTA['household_10k_or_less'], errors="coerce") +  pd.to_numeric(USACensus_IncomeByZCTA['household_10k_to_15k'], errors='coerce') + pd.to_numeric(USACensus_IncomeByZCTA['household_15k_to_25k'] , errors='coerce')
+    USACensus_IncomeByZCTA['household_25k_to_50k'] = pd.to_numeric(USACensus_IncomeByZCTA['household_25k_to_35k'], errors='coerce') + pd.to_numeric(USACensus_IncomeByZCTA['household_35k_to_50k'], errors='coerce') 
+    USACensus_IncomeByZCTA['household_50k_to_150k'] = pd.to_numeric(USACensus_IncomeByZCTA['household_50k_to_75k'], errors='coerce') + pd.to_numeric(USACensus_IncomeByZCTA['household_75k_to_100k'], errors='coerce') + pd.to_numeric(USACensus_IncomeByZCTA['household_100k_to_150k'], errors='coerce')
+    USACensus_IncomeByZCTA['household_150k_or_more'] = pd.to_numeric(USACensus_IncomeByZCTA['household_150k_to_200k'], errors='coerce') + pd.to_numeric(USACensus_IncomeByZCTA['household_200k_or_more'], errors='coerce') 
+    # Se toma el ZCTA Code y la poblacion total para dicha area
+    USACensus_IncomeByZCTA = USACensus_IncomeByZCTA[['ZCTA', 'median_income', 'mean_income', 'households', 'household_25k_or_less', 'household_25k_to_50k', 'household_50k_to_150k', 'household_150k_or_more' ]]
+    # Se hace el join con la base de poblacion
+    gdf_with_population_and_income = gdf_with_population.merge(USACensus_IncomeByZCTA, on="ZCTA", how='left')
+
+    # Se importa la información de Índice de Gini de USA por ZCTA https://data.census.gov/table/ACSDT5Y2023.B19083?q=median+income&g=040XX00US42$8600000&moe=false
+    USACensus_GiniIndex_wide_format = pd.read_csv(USACensus_Gini_path, header=0)
+    # Se transpone la base de datos para tener el ZCTA en las filas y el Indice Gini en las columnas
+    USACensus_GiniIndex = USACensus_GiniIndex_wide_format.melt(
+        id_vars="Label (Grouping)", 
+        var_name="ZCTA", 
+        value_name="Gini Index")
+    # Se remueve la columna repetida
+    USACensus_GiniIndex = USACensus_GiniIndex.drop(columns=["Label (Grouping)"])
+    # Se renombran los campos
+    USACensus_GiniIndex = USACensus_GiniIndex.rename(columns={
+        'Label (Grouping)' : 'ZCTA',
+        'Gini Index': 'GiniIndex'
+    })
+    # Se extrae el ZCTA code de la columna ZCTA
+    USACensus_GiniIndex["ZCTA"] = USACensus_GiniIndex["ZCTA"].str.extract(r"(\d{5})")
+    # Se hace el join con la base de poblacion e income
+    gdf_with_all_features = gdf_with_population_and_income.merge(USACensus_GiniIndex, on="ZCTA", how='left')
+
+    return(gdf_with_all_features)
 
 def robust_minmax_with_params(s, q1, q99):
     s_clipped = s.clip(lower=q1, upper=q99)
