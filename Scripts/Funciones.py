@@ -513,3 +513,31 @@ def apply_risk_indicator(df_new, fitted_params):
     agg['risk_level'] = agg['risk_score'].apply(categorize)
 
     return agg
+
+def cleanDataframe2(df: pd.DataFrame):
+    # Renombrar columnas
+    rename_map = {
+        'dispatch_d' : 'date',
+        'crime_desc' : 'crime_description',
+        'time_of_da' : 'time_of_day',
+        'day_of_wee' : 'day_of_week',
+        'week_of_ye': 'week_of_year',
+        'latino_rac' : 'latino_race',
+        'density_mi' : 'density_mile2',
+        'median_inc' : 'median_income',
+        'mean_incom': 'mean_income',
+        'households' : 'total_households',
+        'household_' : 'household_25k_or_less',
+        'househol_1' : 'household_25k_to_50k',
+        'househol_2' : 'household_50k_to_150k',
+        'househol_3' : 'household_150k_or_more',  
+    }
+    df = df.rename(columns=rename_map)
+    
+    # Convertir a numérico
+    numeric_cols = ['GiniIndex', 'median_income', 'mean_income']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    return df
