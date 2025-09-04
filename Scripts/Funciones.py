@@ -541,3 +541,23 @@ def cleanDataframe2(df: pd.DataFrame):
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
     return df
+
+def chi2_cramersv(df, target, cat_vars):
+    results = []
+    
+    for var in cat_vars:
+        # Contingency table (without margins)
+        ctabla = pd.crosstab(df[var], df[target])
+        
+        # Chi² test
+        chi2, p, dof, expected = chi2_contingency(ctabla)
+        
+        # Cramér’s V
+        n = ctabla.to_numpy().sum()
+        phi2 = chi2 / n
+        r, k = ctabla.shape
+        cramers_v = np.sqrt(phi2 / min(k - 1, r - 1))
+        
+        results.append((var, p, cramers_v))
+    
+    return pd.DataFrame(results, columns=["variable", "p_value", "cramers_v"])
