@@ -9,6 +9,7 @@ import geopandas as gpd
 from shapely.geometry import Point, box
 from scipy.stats import gaussian_kde
 from scipy.ndimage import gaussian_filter
+from scipy.stats import chi2_contingency
 
 
 def normalize_block_name(block_name):
