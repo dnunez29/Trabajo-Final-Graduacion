@@ -178,19 +178,19 @@ def variablesTemporales(data):
     # Se define el periodo con base en la columna 'hour'
     data["time_of_day"] = np.select(condiciones, periodOfTheDay, default='Unknown') 
     # Convertimos fecha en objeto datetime
-    data['dispatch_date'] = pd.to_datetime(data['dispatch_date'])
+    data['date'] = pd.to_datetime(data['date'])
     # Extraemos el día de la semana
-    data['day_of_week'] = data['dispatch_date'].dt.day_name()
+    data['day_of_week'] = data['date'].dt.day_name()
     # # Extraemos semana del año
-    data['week_of_year'] = data['dispatch_date'].dt.isocalendar().week
+    data['week_of_year'] = data['date'].dt.isocalendar().week
     # # Extraemos mes
-    data['month'] = data['dispatch_date'].dt.month_name()
+    data['month'] = data['date'].dt.month_name()
     # # Extraemos estación del año
-    data['season'] = data['dispatch_date'].apply(obtener_estacion)
+    data['season'] = data['date'].apply(obtener_estacion)
     # Se definen los feriados en Filadelfia
-    us_holidays = holidays.UnitedStates(years=data['dispatch_date'].dt.year.unique(),state='PA')
+    us_holidays = holidays.UnitedStates(years=data['date'].dt.year.unique(),state='PA')
     # Crear la nueva columna que marca si es feriado o no
-    data['is_holiday'] = data['dispatch_date'].dt.date.isin(us_holidays)
+    data['is_holiday'] = data['date'].dt.date.isin(us_holidays)
 
     return(data)
 
@@ -266,7 +266,7 @@ def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp
     # Se renombra por simplicidad
     gdf = gdf.rename(columns={'ZCTA5CE20': 'ZCTA'})
     # Se eliminan las columnas que no serán de utilidad
-    gdf = gdf.drop(['index_right', 'crime_code', 'grid_id', 'location_block_normalized'], axis=1)
+    gdf = gdf.drop(['index_right', 'crime_code', 'location_b'], axis=1)
     # Se importa la información del Censo Oficial de USA
     USACensus = pd.read_csv(USACensus_path, skiprows=1, header=0)
     # Cambiar nombre de columna
@@ -356,7 +356,7 @@ def cleanDataframe(data):
     data = gpd.GeoDataFrame(data, crs='EPSG:4326')
 
     # Parse dates and ensure correct types
-    data['dispatch_date'] = pd.to_datetime(data['dispatch_date'], errors='coerce')
+    data['date'] = pd.to_datetime(data['date'], errors='coerce')
 
     # Sanity checks and minimal cleaning
     num_cols = ['dc_dist', 'hour', 'ZCTA', 'area_mile2', 'population', 'density_mile2']
@@ -374,7 +374,7 @@ def cleanDataframe(data):
     return(data)
 
 def apply_risk_indicator(df_new, fitted_params):
-    df_new['dispatch_date'] = pd.to_datetime(df_new['dispatch_date'], errors='coerce')
+    df_new['date'] = pd.to_datetime(df_new['date'], errors='coerce')
     num_cols = ['dc_dist', 'hour', 'ZCTA', 'area_mile2', 'population', 'density_mile2']
     for c in num_cols:
         if c in df_new.columns:
@@ -422,13 +422,45 @@ def apply_risk_indicator(df_new, fitted_params):
         0.15 * agg['violent_norm']
     )
 
+    aggregate_grouped = agg.groupby(['ZCTA']).agg({
+    'risk_score':'mean'
+    }).reset_index()
+
+    Q1 = agg['risk_score'].quantile(0.25)
+    Q3 = agg['risk_score'].quantile(0.75)
+    IQR = Q3 - Q1
+
+    # Definir límites
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    # Reemplazar outliers por NaN
+    agg['risk_score'] = agg['risk_score'].mask(
+        (agg['risk_score'] < lower_bound) | (agg['risk_score'] > upper_bound),
+        np.nan
+    )
+
+    # Unir agg con aggregate_grouped para tener el promedio de cada ZCTA
+    agg = agg.merge(
+        aggregate_grouped,
+        on='ZCTA',
+        how='left',
+        suffixes=('', '_mean')
+    )
+
+    # Reemplazar NaN en risk_score con el promedio de su ZCTA
+    agg['risk_score'] = agg['risk_score'].fillna(agg['risk_score_mean'])
+
+    # Opcional: eliminar columna auxiliar si ya no la necesitas
+    agg = agg.drop(columns=['risk_score_mean'])
+
     # Apply stored thresholds
     thresholds = fitted_params['thresholds']
     def categorize(p):
-        if p <= thresholds['low_threshold']:
+        if p <= 0.5: # thresholds['low_threshold']:
             return 'Low'
-        elif p <= thresholds['high_threshold']:
-            return 'Moderate'
+        # elif p <= thresholds['high_threshold']:
+        #     return 'Moderate'
         else:
             return 'High'
     agg['risk_level'] = agg['risk_score'].apply(categorize)
