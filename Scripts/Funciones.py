@@ -247,6 +247,9 @@ def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp
     zcta_lat_lon = zcta.to_crs(epsg=4326)
      # Se procede con un JOIN espacial
     gdf_joined = gpd.sjoin(gdf, zcta_lat_lon, how="left", predicate='within')
+    # Se extraen coordenadas por aparte
+    gdf_joined['lon'] = gdf_joined.geometry.x
+    gdf_joined['lat'] = gdf_joined.geometry.y
     
     # KEY CHANGE: Replace point geometry with ZCTA polygon geometry
     # First, merge with zcta_lat_lon to get the ZCTA geometries
@@ -514,3 +517,13 @@ def chi2_cramersv(df, target, cat_vars):
         results.append((var, p, cramers_v))
     
     return pd.DataFrame(results, columns=["variable", "p_value", "cramers_v"])
+
+def optimal_binning(X_train, y_train, variable):
+    """Crear optimal binning para una variable"""
+    optb = OptimalBinning(name=variable, dtype="numerical", solver="cp")
+    optb.fit(X_train[variable], y_train)
+    
+    binning_table = optb.binning_table
+    binning_table.build()
+    
+    return optb, binning_table
