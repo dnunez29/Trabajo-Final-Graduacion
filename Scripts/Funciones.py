@@ -11,6 +11,7 @@ from shapely.geometry import Point, box
 from scipy.stats import gaussian_kde
 from scipy.ndimage import gaussian_filter
 from scipy.stats import chi2_contingency
+from optbinning import Scorecard, BinningProcess, OptimalBinning
 
 
 def normalize_block_name(block_name):
@@ -397,11 +398,48 @@ def apply_risk_indicator(df_new, fitted_params):
 
     agg['exposure_capita'] = agg['population']
     agg['exposure_area'] = agg['area_mile2']
+    #################################################################################################
+    # Crimenes totales cuantificados en la base de entrenamiento
+    total_crimes = len(df_new)
+    # Exposicion total (suma del area total de todas las zonas ZCTA, asi como de la poblacion)
+    total_population = zcta_denom['population'].sum()
+    total_area = zcta_denom['area_mile2'].sum()
+    # Se implementan condicionales por si hubiera algun error en los datos
+    if total_population <= 0:
+        total_population = 1.0
+    if total_area <= 0:
+        total_area = 1.0
 
-    # Use stored priors
-    alpha_capita, beta_capita = fitted_params['alpha_capita'], fitted_params['beta_capita']
-    alpha_area, beta_area = fitted_params['alpha_area'], fitted_params['beta_area']
+    # Se calcula un lambda global per capita y por area
+    lambda_global_capita = total_crimes / total_population
+    lambda_global_area = total_crimes / total_area
 
+    print('Global per-capita rate:', lambda_global_capita)
+    print('Global per-area rate:', lambda_global_area)
+
+    # Contracción Bayesiana Empírica para cada celda usando conjugación Gamma-Poisson
+    # Tasa media posterior = (alpha + k) / (beta + exposición)
+    # Establecer fuerza del prior equivalente a exposición_previa de 1 población y área promedio de ZCTA 
+
+    # Calcular población/área típica para calibrar la fuerza del prior
+    median_pop = zcta_denom['population'].median()
+    median_area = zcta_denom['area_mile2'].median()
+
+    # Para granularidad a nivel de hora, un día tiene hasta 24 horas; usar priors más débiles
+    prior_exposure_capita = median_pop * 0.05  
+    prior_exposure_area = median_area * 0.2    
+    # Se calculan los parametros
+    alpha_capita = lambda_global_capita * prior_exposure_capita
+    beta_capita = prior_exposure_capita
+    alpha_area = lambda_global_area * prior_exposure_area
+    beta_area = prior_exposure_area
+    
+    #################################################################################################
+
+    # # Use stored priors
+    # alpha_capita, beta_capita = fitted_params['alpha_capita'], fitted_params['beta_capita']
+    # alpha_area, beta_area = fitted_params['alpha_area'], fitted_params['beta_area']
+    
     agg['rate_capita_post'] = (alpha_capita + agg['crime_count']) / (beta_capita + agg['exposure_capita'])
     agg['rate_area_post'] = (alpha_area + agg['crime_count']) / (beta_area + agg['exposure_area'])
 
@@ -411,12 +449,25 @@ def apply_risk_indicator(df_new, fitted_params):
     agg = agg.merge(violence_grp, on=['ZCTA','time_of_day'], how='left')
     agg['violent_share'] = agg['violent_share'].fillna(0.0)
 
+    #################################################################################################
+    # Se guardan los cuantiles
+    capita_q1, capita_q99 = agg['rate_capita_post'].quantile([0.01, 0.99])
+    area_q1, area_q99     = agg['rate_area_post'].quantile([0.01, 0.99])
+    density_q1, density_q99 = agg['density_mile2'].quantile([0.01, 0.99])
+    violent_q1, violent_q99 = agg['violent_share'].quantile([0.01, 0.99])
+
+    agg['capita_norm']  = robust_minmax_with_params(agg['rate_capita_post'], capita_q1, capita_q99)
+    agg['area_norm']    = robust_minmax_with_params(agg['rate_area_post'], area_q1, area_q99)
+    agg['density_norm'] = robust_minmax_with_params(agg['density_mile2'], density_q1, density_q99)
+    agg['violent_norm'] = robust_minmax_with_params(agg['violent_share'], violent_q1, violent_q99)
+    #################################################################################################
+
     # Normalize with train quantiles
-    q_params = fitted_params['q_params']
-    agg['capita_norm'] = robust_minmax_with_params(agg['rate_capita_post'], *q_params['rate_capita_post'])
-    agg['area_norm'] = robust_minmax_with_params(agg['rate_area_post'], *q_params['rate_area_post'])
-    agg['density_norm'] = robust_minmax_with_params(agg['density_mile2'], *q_params['density_mile2'])
-    agg['violent_norm'] = robust_minmax_with_params(agg['violent_share'], *q_params['violent_share'])
+    # q_params = fitted_params['q_params']
+    # agg['capita_norm'] = robust_minmax_with_params(agg['rate_capita_post'], *q_params['rate_capita_post'])
+    # agg['area_norm'] = robust_minmax_with_params(agg['rate_area_post'], *q_params['rate_area_post'])
+    # agg['density_norm'] = robust_minmax_with_params(agg['density_mile2'], *q_params['density_mile2'])
+    # agg['violent_norm'] = robust_minmax_with_params(agg['violent_share'], *q_params['violent_share'])
 
     agg['risk_score'] = (
         0.35 * agg['capita_norm'] +
