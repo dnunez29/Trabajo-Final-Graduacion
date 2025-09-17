@@ -15,9 +15,6 @@ from optbinning import Scorecard, BinningProcess, OptimalBinning
 
 
 def normalize_block_name(block_name):
-    """
-    Función para normalizar nombres de bloques
-    """
     if pd.isna(block_name):
         return block_name
     
@@ -58,29 +55,6 @@ def normalize_block_name(block_name):
     normalized = re.sub(r'\s+', ' ', normalized)
     
     return normalized.strip()
-
-def limpiar_entorno(vars_a_conservar):
-    especiales = [k for k in globals().keys() if k.startswith('_') or k in (
-        '__builtins__', '__name__', '__doc__', '__package__', '__loader__',
-        '__spec__', '__annotations__', '__file__', '__cached__'
-    )]
-    
-    conservar = set(vars_a_conservar) | set(especiales)
-
-    # Creamos un bloque de código que borra las variables que no se van a conservar
-    for var in list(globals()):
-        if var not in conservar:
-            exec(f"del {var}", globals())
-
-def create_grid(bounds, cell_size=500):
-    xmin, ymin, xmax, ymax = bounds
-    grid_cells = []
-    for x0 in range(int(xmin), int(xmax), cell_size):
-        for y0 in range(int(ymin), int(ymax), cell_size):
-            x1 = x0 + cell_size
-            y1 = y0 + cell_size
-            grid_cells.append(box(x0, y0, x1, y1))
-    return gpd.GeoDataFrame(geometry=grid_cells, crs="EPSG:3857")
 
 def create_heatmap(gdf, grid=None, show_grid=True, grid_style='white', ax=None):
     # Si no se pasa un ax, crear figura nueva
@@ -251,9 +225,8 @@ def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp
     # Se extraen coordenadas por aparte
     gdf_joined['lon'] = gdf_joined.geometry.x
     gdf_joined['lat'] = gdf_joined.geometry.y
-    
-    # KEY CHANGE: Replace point geometry with ZCTA polygon geometry
-    # First, merge with zcta_lat_lon to get the ZCTA geometries
+
+    # Luego se hace un join por aparte para extraer la geometria de los poligonos de los ZCTA
     gdf_with_zcta_geom = gdf_joined.merge(
         zcta_lat_lon[['ZCTA5CE20', 'geometry']], 
         on='ZCTA5CE20', 
@@ -261,12 +234,13 @@ def variablesDemograficas(data, zcta_path = "../Input/ZIP/tl_2020_us_zcta520.shp
         suffixes=('_point', '_zcta')
     )
     
-    # Drop the original point geometry and rename ZCTA geometry
+    # Se elimina la geometría original de los crímenes (Esto porque un objeto GeoDatafram solo puede tener una geometría)
     gdf_with_zcta_geom = gdf_with_zcta_geom.drop('geometry_point', axis=1)
     gdf_with_zcta_geom = gdf_with_zcta_geom.rename(columns={'geometry_zcta': 'geometry'})
-    
-    # Ensure it's still a GeoDataFrame with the correct geometry column
+
+    # Se convierte en un objeto GeoDataframe nuevamente
     gdf = gpd.GeoDataFrame(gdf_with_zcta_geom, geometry='geometry')
+
     # Se renombra por simplicidad
     gdf = gdf.rename(columns={'ZCTA5CE20': 'ZCTA'})
     # Se eliminan las columnas que no serán de utilidad
@@ -346,38 +320,29 @@ def robust_minmax_with_params(s, q1, q99):
     s_clipped = s.clip(lower=q1, upper=q99)
     denom = (q99 - q1) if (q99 - q1) != 0 else 1.0
     return (s_clipped - q1) / denom
-
-def categorize(p, thresholds):
-    if p <= thresholds['low_threshold']:
-        return 'Low'
-    elif p <= thresholds['high_threshold']:
-        return 'Moderate'
-    else:
-        return 'High'
     
 def cleanDataframe(data):
 
     data = gpd.GeoDataFrame(data, crs='EPSG:4326')
 
-    # Parse dates and ensure correct types
+    # Nos aseguramos que la fecha sea un objeto datatime
     data['date'] = pd.to_datetime(data['date'], errors='coerce')
 
-    # Sanity checks and minimal cleaning
+    # Nos aseguramos que el resto de variables sean numeric
     num_cols = ['dc_dist', 'hour', 'ZCTA', 'area_mile2', 'population', 'density_mile2']
     for c in num_cols:
         if c in data.columns:
             data[c] = pd.to_numeric(data[c], errors='coerce')
 
-    # Ensure categorical harmonization
+    # Se homologa el formato en la variable tipo de crimen 
     data['crimeType'] = data['crimeType'].str.title()
 
-    # Keep only rows with non-null population and area to avoid divide-by-zero later
+    # Se eliminan las filas cuya población sea cero o venga en NA
     data = data[(data['population'].notna()) & (data['population'] > 0) & (data['area_mile2'].notna()) & (data['area_mile2'] > 0)]
-    print('Filtered to rows with positive population and area. Shape:', data.shape)
 
     return(data)
 
-def apply_risk_indicator(df_new, fitted_params):
+def apply_risk_indicator(df_new):
     df_new['date'] = pd.to_datetime(df_new['date'], errors='coerce')
     num_cols = ['dc_dist', 'hour', 'ZCTA', 'area_mile2', 'population', 'density_mile2']
     for c in num_cols:
@@ -435,10 +400,6 @@ def apply_risk_indicator(df_new, fitted_params):
     beta_area = prior_exposure_area
     
     #################################################################################################
-
-    # # Use stored priors
-    # alpha_capita, beta_capita = fitted_params['alpha_capita'], fitted_params['beta_capita']
-    # alpha_area, beta_area = fitted_params['alpha_area'], fitted_params['beta_area']
     
     agg['rate_capita_post'] = (alpha_capita + agg['crime_count']) / (beta_capita + agg['exposure_capita'])
     agg['rate_area_post'] = (alpha_area + agg['crime_count']) / (beta_area + agg['exposure_area'])
@@ -460,14 +421,8 @@ def apply_risk_indicator(df_new, fitted_params):
     agg['area_norm']    = robust_minmax_with_params(agg['rate_area_post'], area_q1, area_q99)
     agg['density_norm'] = robust_minmax_with_params(agg['density_mile2'], density_q1, density_q99)
     agg['violent_norm'] = robust_minmax_with_params(agg['violent_share'], violent_q1, violent_q99)
-    #################################################################################################
 
-    # Normalize with train quantiles
-    # q_params = fitted_params['q_params']
-    # agg['capita_norm'] = robust_minmax_with_params(agg['rate_capita_post'], *q_params['rate_capita_post'])
-    # agg['area_norm'] = robust_minmax_with_params(agg['rate_area_post'], *q_params['rate_area_post'])
-    # agg['density_norm'] = robust_minmax_with_params(agg['density_mile2'], *q_params['density_mile2'])
-    # agg['violent_norm'] = robust_minmax_with_params(agg['violent_share'], *q_params['violent_share'])
+    #################################################################################################
 
     agg['risk_score'] = (
         0.35 * agg['capita_norm'] +
@@ -509,12 +464,9 @@ def apply_risk_indicator(df_new, fitted_params):
     agg = agg.drop(columns=['risk_score_mean'])
 
     # Apply stored thresholds
-    thresholds = fitted_params['thresholds']
     def categorize(p):
-        if p <= 0.5: # thresholds['low_threshold']:
+        if p <= 0.5: 
             return 'Low'
-        # elif p <= thresholds['high_threshold']:
-        #     return 'Moderate'
         else:
             return 'High'
     agg['risk_level'] = agg['risk_score'].apply(categorize)
@@ -553,13 +505,13 @@ def chi2_cramersv(df, target, cat_vars):
     results = []
     
     for var in cat_vars:
-        # Contingency table (without margins)
+        # Tabla de contingencia
         ctabla = pd.crosstab(df[var], df[target])
         
-        # Chi² test
+        # Test Chi2 
         chi2, p, dof, expected = chi2_contingency(ctabla)
         
-        # Cramér’s V
+        # V de Cramer
         n = ctabla.to_numpy().sum()
         phi2 = chi2 / n
         r, k = ctabla.shape
@@ -570,7 +522,7 @@ def chi2_cramersv(df, target, cat_vars):
     return pd.DataFrame(results, columns=["variable", "p_value", "cramers_v"])
 
 def optimal_binning(X_train, y_train, variable):
-    """Crear optimal binning para una variable"""
+    # Optimal Binning para la tramificación de variables numéricas
     optb = OptimalBinning(name=variable, dtype="numerical", solver="cp")
     optb.fit(X_train[variable], y_train)
     
